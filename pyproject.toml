@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "expkit"
+version = "0.1.0"
+description = "POC SDK for running ML experiments with remote-style execution and live metrics"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "psycopg[binary]>=3.2.0",
+  "python-dotenv>=1.0.1"
+]
+
+[project.scripts]
+expkit = "expkit.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["expkit*"]
