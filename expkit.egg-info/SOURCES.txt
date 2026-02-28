@@ -13,6 +13,8 @@ expkit.egg-info/dependency_links.txt
 expkit.egg-info/entry_points.txt
 expkit.egg-info/requires.txt
 expkit.egg-info/top_level.txt
+expkit/cloud/__init__.py
+expkit/cloud/aws_runner.py
 expkit/dashboard/__init__.py
 expkit/dashboard/app.py
 expkit/runtime/__init__.py

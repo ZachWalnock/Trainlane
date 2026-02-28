@@ -8,6 +8,7 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from expkit.config import load_settings
+from expkit.cloud.aws_runner import AwsTrainingRequest, build_hints, run_sagemaker_training
 from expkit.db import Store
 from expkit.errors import RemoteExecutionError
 from expkit.runtime.packager import (
@@ -56,7 +57,13 @@ class Trainer:
             source=source,
         )
 
-    def run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def run(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        cloud: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """
         In controller mode, this launches the experiment in a remote-style worker process.
         In worker mode, it executes the function directly.
@@ -143,7 +150,103 @@ class Trainer:
                 store=store,
             )
 
+        def on_stdout(line: str) -> None:
+            print(line)
+            self._append_event(
+                run_id=run_id,
+                event_type="stdout",
+                key=None,
+                value={"line": line},
+                source="worker",
+                step=None,
+                store=store,
+            )
+
+        def on_stderr(line: str) -> None:
+            print(line, file=sys.stderr)
+            self._append_event(
+                run_id=run_id,
+                event_type="stderr",
+                key=None,
+                value={"line": line},
+                source="worker",
+                step=None,
+                store=store,
+            )
+
+        def emit_proof(key: str, payload: dict[str, Any]) -> None:
+            self._append_event(
+                run_id=run_id,
+                event_type="proof",
+                key=key,
+                value=payload,
+                source="controller",
+                step=None,
+                store=store,
+            )
+
         emit_system("[expkit] Dashboard is live. Preparing execution backend.")
+
+        if settings.execution_mode == "aws":
+            if not settings.aws_sagemaker_role_arn:
+                raise RuntimeError("EXPKIT_SAGEMAKER_ROLE_ARN is required for aws mode.")
+            if not settings.aws_s3_bucket:
+                raise RuntimeError("EXPKIT_AWS_S3_BUCKET is required for aws mode.")
+
+            hints = build_hints(
+                cloud,
+                default_budget=settings.max_budget_usd_per_run,
+                default_spot=settings.aws_use_spot,
+            )
+
+            backend = "aws-sagemaker"
+            store.update_run_execution(run_id=run_id, backend=backend, image_tag=None)
+            emit_system(f"[expkit] Launching worker with backend={backend}.")
+
+            request = AwsTrainingRequest(
+                run_id=run_id,
+                script_path=script_path,
+                project_dir=project_dir,
+                script_args=script_args,
+                database_url=settings.database_url,
+                role_arn=settings.aws_sagemaker_role_arn,
+                s3_bucket=settings.aws_s3_bucket,
+                allowed_regions=settings.aws_regions,
+                aws_profile=settings.aws_profile,
+                expected_account_id=settings.aws_account_id,
+                hints=hints,
+            )
+
+            try:
+                result = run_sagemaker_training(
+                    request,
+                    emit_system=emit_system,
+                    emit_stdout=on_stdout,
+                    emit_stderr=on_stderr,
+                    emit_proof=emit_proof,
+                )
+            except Exception as exc:
+                summary = str(exc)[-1200:]
+                store.finish_run(run_id=run_id, status="failed", error_summary=summary)
+                if isinstance(exc, RemoteExecutionError):
+                    raise
+                raise RemoteExecutionError(
+                    f"AWS execution failed for run {run_id}: {exc}"
+                ) from exc
+
+            emit_proof(
+                "cloud_completion",
+                {
+                    "job_name": result.job_name,
+                    "job_arn": result.job_arn,
+                    "region": result.region,
+                    "instance_type": result.instance_type,
+                    "model_artifact_s3_uri": result.model_artifact_s3_uri,
+                },
+            )
+            store.finish_run(run_id=run_id, status="succeeded")
+            print(f"[expkit] run completed successfully: {run_id}")
+            return
 
         requirements_exists = (project_dir / "requirements.txt").exists()
         if settings.docker_enabled and requirements_exists:
@@ -195,30 +298,6 @@ class Trainer:
         base_env["EXPKIT_REMOTE"] = "1"
         base_env["EXPKIT_RUN_ID"] = str(run_id)
         base_env["SUPABASE_DB_URL"] = settings.database_url
-
-        def on_stdout(line: str) -> None:
-            print(line)
-            self._append_event(
-                run_id=run_id,
-                event_type="stdout",
-                key=None,
-                value={"line": line},
-                source="worker",
-                step=None,
-                store=store,
-            )
-
-        def on_stderr(line: str) -> None:
-            print(line, file=sys.stderr)
-            self._append_event(
-                run_id=run_id,
-                event_type="stderr",
-                key=None,
-                value={"line": line},
-                source="worker",
-                step=None,
-                store=store,
-            )
 
         if backend == "docker" and image_tag and script_rel_for_docker:
             cmd = docker_cmd(

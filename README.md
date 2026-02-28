@@ -7,8 +7,10 @@ ExpKit is a proof-of-concept Python SDK for running ML experiments with a remote
 - Provides `trainer.run()` so users write normal Python training code.
 - Provides `trainer.log()` for structured metric/event logging.
 - Starts a localhost dashboard immediately at run startup.
-- Auto-generates a Dockerfile and attempts Docker execution first.
-- Falls back to isolated local worker process if Docker daemon is unavailable.
+- Supports two execution modes:
+  - `local`: Docker/process-backed simulated remote execution.
+  - `aws`: real SageMaker training jobs in your AWS account.
+- Preserves local fallback by switching `EXPKIT_EXECUTION_MODE=local`.
 - Persists runs/events into Supabase Postgres.
 - Starts a polished dashboard at `http://127.0.0.1:<port>/runs/<run_id>` with live metrics and logs.
 - Propagates remote worker failures back to terminal with stderr tail.
@@ -35,6 +37,35 @@ python examples/train_example.py
 
 The SDK prints the run ID and dashboard URL.
 
+## AWS mode (real cloud compute)
+
+Set:
+
+```bash
+export EXPKIT_EXECUTION_MODE=aws
+export AWS_PROFILE=expkit
+export AWS_ACCOUNT_ID=123456789012
+export EXPKIT_AWS_REGIONS=us-east-1,us-east-2
+export EXPKIT_SAGEMAKER_ROLE_ARN=arn:aws:iam::123456789012:role/expkit-sagemaker-exec
+export EXPKIT_AWS_S3_BUCKET=your-expkit-bucket
+export EXPKIT_MAX_BUDGET_USD_PER_RUN=50
+export EXPKIT_AWS_COMPUTE=cpu
+export EXPKIT_AWS_USE_SPOT=0
+```
+
+Then run:
+
+```bash
+python examples/train_cloud_example.py
+```
+
+ExpKit will:
+
+- Select a small SageMaker instance using model size, dataset size, speed preference, and budget.
+- Submit a real SageMaker training job.
+- Stream CloudWatch logs back into terminal + dashboard.
+- Persist cloud proof artifacts (`account identity`, `job ARN`, `CloudTrail event`) in `events` as `event_type='proof'`.
+
 ## User API
 
 ```python
@@ -58,10 +89,12 @@ if __name__ == "__main__":
 - `metric`: explicit `trainer.log` calls
 - `stdout`: worker stdout line
 - `stderr`: worker stderr line / traceback
+- `system`: orchestration status messages
+- `proof`: cloud-account/job/audit artifacts for verification
 
 Schema is in [`db/schema.sql`](db/schema.sql).
 
 ## Notes
 
-- For this POC, cloud allocation is simulated by running in Docker or a separate worker process.
+- `aws` mode uses SageMaker in your AWS account. `local` mode keeps the original POC path.
 - Auth, multi-user isolation, artifact storage, and run comparison are intentionally out of scope.
