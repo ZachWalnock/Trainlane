@@ -8,7 +8,6 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from expkit.config import load_settings
-from expkit.cloud.aws_runner import AwsTrainingRequest, build_hints, run_sagemaker_training
 from expkit.db import Store
 from expkit.errors import RemoteExecutionError
 from expkit.runtime.packager import (
@@ -17,6 +16,7 @@ from expkit.runtime.packager import (
     docker_daemon_ready,
     generate_dockerfile,
 )
+from expkit.runtime.modal_backend import modal_authenticated, modal_available, run_on_modal
 from expkit.runtime.runner import docker_cmd, local_cmd, run_with_streaming
 from expkit.runtime.server import DashboardServer
 
@@ -57,13 +57,7 @@ class Trainer:
             source=source,
         )
 
-    def run(
-        self,
-        fn: Callable[..., Any],
-        *args: Any,
-        cloud: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
+    def run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """
         In controller mode, this launches the experiment in a remote-style worker process.
         In worker mode, it executes the function directly.
@@ -113,7 +107,7 @@ class Trainer:
 
         backend = "process"
         image_tag: str | None = None
-        script_rel_for_docker: Path | None = None
+        script_rel: Path | None = None
         store.create_run(
             run_id=run_id,
             script_path=str(script_path),
@@ -150,6 +144,81 @@ class Trainer:
                 store=store,
             )
 
+        emit_system("[expkit] Dashboard is live. Preparing execution backend.")
+
+        # --- Modal backend (highest priority) ---
+        if settings.modal_enabled:
+            if not modal_available():
+                emit_system("[expkit] modal package not installed; falling back to Docker/process.")
+            else:
+                auth_ok, auth_reason = modal_authenticated()
+                if not auth_ok:
+                    emit_system(
+                        f"[expkit] Modal not authenticated; falling back. Reason: {auth_reason}"
+                    )
+                else:
+                    try:
+                        script_rel = script_path.relative_to(project_dir)
+                        backend = "modal"
+                        emit_system("[expkit] Modal cloud backend selected.")
+                    except ValueError:
+                        emit_system(
+                            "[expkit] Script path is outside project directory; "
+                            "falling back to Docker/process."
+                        )
+
+        # --- Docker backend (fallback when Modal not selected) ---
+        requirements_exists = (project_dir / "requirements.txt").exists()
+        if backend == "process" and settings.docker_enabled and requirements_exists:
+            if not docker_available():
+                emit_system("[expkit] Docker CLI not found; using process backend.")
+            else:
+                daemon_ready, daemon_reason = docker_daemon_ready()
+                if not daemon_ready:
+                    emit_system(
+                        "[expkit] Docker daemon unavailable; using process backend. "
+                        f"Reason: {daemon_reason}"
+                    )
+                else:
+                    try:
+                        emit_system("[expkit] Docker daemon ready. Building runtime image.")
+                        dockerfile = generate_dockerfile(project_dir=project_dir, run_id=run_id)
+                        image_tag = build_image(
+                            project_dir=project_dir,
+                            dockerfile=dockerfile,
+                            run_id=run_id,
+                        )
+                        try:
+                            script_rel = script_path.relative_to(project_dir)
+                            backend = "docker"
+                            emit_system("[expkit] Docker image build complete.")
+                        except ValueError:
+                            backend = "process"
+                            image_tag = None
+                            emit_system(
+                                "[expkit] Script path is outside project directory; "
+                                "using process backend."
+                            )
+                    except Exception as exc:
+                        backend = "process"
+                        image_tag = None
+                        emit_system(
+                            "[expkit] Docker image build failed; using process backend. "
+                            f"Reason: {exc}"
+                        )
+        elif backend == "process" and settings.docker_enabled and not requirements_exists:
+            emit_system("[expkit] requirements.txt not found; using process backend.")
+        elif backend == "process" and not settings.docker_enabled:
+            emit_system("[expkit] Docker disabled via EXPKIT_DOCKER=0; using process backend.")
+
+        store.update_run_execution(run_id=run_id, backend=backend, image_tag=image_tag)
+        emit_system(f"[expkit] Launching worker with backend={backend}.")
+
+        base_env = os.environ.copy()
+        base_env["EXPKIT_REMOTE"] = "1"
+        base_env["EXPKIT_RUN_ID"] = str(run_id)
+        base_env["SUPABASE_DB_URL"] = settings.database_url
+
         def on_stdout(line: str) -> None:
             print(line)
             self._append_event(
@@ -174,148 +243,39 @@ class Trainer:
                 store=store,
             )
 
-        def emit_proof(key: str, payload: dict[str, Any]) -> None:
-            self._append_event(
-                run_id=run_id,
-                event_type="proof",
-                key=key,
-                value=payload,
-                source="controller",
-                step=None,
-                store=store,
-            )
-
-        emit_system("[expkit] Dashboard is live. Preparing execution backend.")
-
-        if settings.execution_mode == "aws":
-            if not settings.aws_sagemaker_role_arn:
-                raise RuntimeError("EXPKIT_SAGEMAKER_ROLE_ARN is required for aws mode.")
-            if not settings.aws_s3_bucket:
-                raise RuntimeError("EXPKIT_AWS_S3_BUCKET is required for aws mode.")
-
-            hints = build_hints(
-                cloud,
-                default_budget=settings.max_budget_usd_per_run,
-                default_spot=settings.aws_use_spot,
-            )
-
-            backend = "aws-sagemaker"
-            store.update_run_execution(run_id=run_id, backend=backend, image_tag=None)
-            emit_system(f"[expkit] Launching worker with backend={backend}.")
-
-            request = AwsTrainingRequest(
-                run_id=run_id,
-                script_path=script_path,
+        if backend == "modal" and script_rel:
+            code, stderr_tail = run_on_modal(
                 project_dir=project_dir,
+                script_rel=script_rel,
                 script_args=script_args,
-                database_url=settings.database_url,
-                role_arn=settings.aws_sagemaker_role_arn,
-                s3_bucket=settings.aws_s3_bucket,
-                allowed_regions=settings.aws_regions,
-                aws_profile=settings.aws_profile,
-                expected_account_id=settings.aws_account_id,
-                hints=hints,
+                env=base_env,
+                run_id=run_id,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
             )
-
-            try:
-                result = run_sagemaker_training(
-                    request,
-                    emit_system=emit_system,
-                    emit_stdout=on_stdout,
-                    emit_stderr=on_stderr,
-                    emit_proof=emit_proof,
-                )
-            except Exception as exc:
-                summary = str(exc)[-1200:]
-                store.finish_run(run_id=run_id, status="failed", error_summary=summary)
-                if isinstance(exc, RemoteExecutionError):
-                    raise
-                raise RemoteExecutionError(
-                    f"AWS execution failed for run {run_id}: {exc}"
-                ) from exc
-
-            emit_proof(
-                "cloud_completion",
-                {
-                    "job_name": result.job_name,
-                    "job_arn": result.job_arn,
-                    "region": result.region,
-                    "instance_type": result.instance_type,
-                    "model_artifact_s3_uri": result.model_artifact_s3_uri,
-                },
-            )
-            store.finish_run(run_id=run_id, status="succeeded")
-            print(f"[expkit] run completed successfully: {run_id}")
-            return
-
-        requirements_exists = (project_dir / "requirements.txt").exists()
-        if settings.docker_enabled and requirements_exists:
-            if not docker_available():
-                emit_system("[expkit] Docker CLI not found; using process backend.")
-            else:
-                daemon_ready, daemon_reason = docker_daemon_ready()
-                if not daemon_ready:
-                    emit_system(
-                        "[expkit] Docker daemon unavailable; using process backend. "
-                        f"Reason: {daemon_reason}"
-                    )
-                else:
-                    try:
-                        emit_system("[expkit] Docker daemon ready. Building runtime image.")
-                        dockerfile = generate_dockerfile(project_dir=project_dir, run_id=run_id)
-                        image_tag = build_image(
-                            project_dir=project_dir,
-                            dockerfile=dockerfile,
-                            run_id=run_id,
-                        )
-                        try:
-                            script_rel_for_docker = script_path.relative_to(project_dir)
-                            backend = "docker"
-                            emit_system("[expkit] Docker image build complete.")
-                        except ValueError:
-                            backend = "process"
-                            image_tag = None
-                            emit_system(
-                                "[expkit] Script path is outside project directory; "
-                                "using process backend."
-                            )
-                    except Exception as exc:
-                        backend = "process"
-                        image_tag = None
-                        emit_system(
-                            "[expkit] Docker image build failed; using process backend. "
-                            f"Reason: {exc}"
-                        )
-        elif settings.docker_enabled and not requirements_exists:
-            emit_system("[expkit] requirements.txt not found; using process backend.")
-        elif not settings.docker_enabled:
-            emit_system("[expkit] Docker disabled via EXPKIT_DOCKER=0; using process backend.")
-
-        store.update_run_execution(run_id=run_id, backend=backend, image_tag=image_tag)
-        emit_system(f"[expkit] Launching worker with backend={backend}.")
-
-        base_env = os.environ.copy()
-        base_env["EXPKIT_REMOTE"] = "1"
-        base_env["EXPKIT_RUN_ID"] = str(run_id)
-        base_env["SUPABASE_DB_URL"] = settings.database_url
-
-        if backend == "docker" and image_tag and script_rel_for_docker:
+        elif backend == "docker" and image_tag and script_rel:
             cmd = docker_cmd(
                 image_tag=image_tag,
-                script_rel=script_rel_for_docker,
+                script_rel=script_rel,
                 env=base_env,
                 script_args=script_args,
             )
+            code, stderr_tail = run_with_streaming(
+                cmd=cmd,
+                cwd=project_dir,
+                env=base_env,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+            )
         else:
             cmd = local_cmd(script_path, script_args)
-
-        code, stderr_tail = run_with_streaming(
-            cmd=cmd,
-            cwd=project_dir,
-            env=base_env,
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
-        )
+            code, stderr_tail = run_with_streaming(
+                cmd=cmd,
+                cwd=project_dir,
+                env=base_env,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+            )
 
         if code == 0:
             store.finish_run(run_id=run_id, status="succeeded")
