@@ -37,6 +37,22 @@ python examples/train_example.py
 
 The SDK prints the run ID and dashboard URL.
 
+## Run locally (no cloud)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+export SUPABASE_DB_URL='postgresql://postgres:[password]@[host]:5432/postgres'
+export EXPKIT_EXECUTION_MODE=local
+export EXPKIT_DOCKER=0
+
+python examples/train_example.py
+```
+
+Use `EXPKIT_DOCKER=1` to use Docker-backed local simulation instead of direct local worker execution.
+
 ## AWS mode (real cloud compute)
 
 Set:
