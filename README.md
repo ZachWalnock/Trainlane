@@ -35,6 +35,48 @@ python examples/train_example.py
 
 The SDK prints the run ID and dashboard URL.
 
+## Modal mode (real cloud compute)
+
+### 1. Install with the Modal extra
+
+```bash
+pip install -e ".[modal]"
+```
+
+This installs `modal>=0.60` in addition to the core dependencies.
+
+### 2. Authenticate with Modal
+
+Either run the interactive login (stores credentials in `~/.modal.toml`):
+
+```bash
+modal token new
+```
+
+Or set env vars directly:
+
+```bash
+export MODAL_TOKEN_ID=your-token-id
+export MODAL_TOKEN_SECRET=your-token-secret
+```
+
+### 3. Set required env vars
+
+```bash
+export SUPABASE_DB_URL='postgresql://postgres:[password]@[host]:5432/postgres'
+export EXPKIT_MODAL=1
+```
+
+### 4. Run
+
+```bash
+python examples/train_example.py
+```
+
+ExpKit will package your project, push it to a Modal Sandbox, stream stdout/stderr back to the terminal and dashboard, and persist all events in Supabase.
+
+> If Modal is not installed or credentials are missing, ExpKit automatically falls back to Docker/local process execution.
+
 ## User API
 
 ```python
