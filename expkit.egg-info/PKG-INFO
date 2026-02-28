@@ -1,7 +1,24 @@
 Metadata-Version: 2.4
 Name: expkit
 Version: 0.1.0
-Summary: POC SDK for running ML experiments with remote-style execution and live metrics
+Summary: Python SDK for running ML experiments with local or SageMaker execution and live metrics
+Author: ExpKit Team
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/expkit/expkit
+Project-URL: Documentation, https://github.com/expkit/expkit#readme
+Project-URL: Issues, https://github.com/expkit/expkit/issues
+Keywords: ml,experiment-tracking,sagemaker,training,sdk
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Software Development :: Libraries
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
@@ -10,6 +27,10 @@ Requires-Dist: uvicorn>=0.30.0
 Requires-Dist: psycopg[binary]>=3.2.0
 Requires-Dist: python-dotenv>=1.0.1
 Requires-Dist: boto3>=1.34.0
+Provides-Extra: dev
+Requires-Dist: build>=1.2.2; extra == "dev"
+Requires-Dist: twine>=5.1.1; extra == "dev"
+Requires-Dist: pytest>=8.3.0; extra == "dev"
 Dynamic: license-file
 
 # ExpKit POC
@@ -51,6 +72,28 @@ python examples/train_example.py
 
 The SDK prints the run ID and dashboard URL.
 
+## Run locally (no cloud)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+export SUPABASE_DB_URL='postgresql://postgres:[password]@[host]:5432/postgres'
+export EXPKIT_EXECUTION_MODE=local
+export EXPKIT_DOCKER=0
+
+python examples/train_example.py
+```
+
+Use `EXPKIT_DOCKER=1` to use Docker-backed local simulation instead of direct local worker execution.
+
+## Install from PyPI
+
+```bash
+pip install expkit
+```
+
 ## AWS mode (real cloud compute)
 
 Set:
@@ -63,7 +106,8 @@ export EXPKIT_AWS_REGIONS=us-east-1,us-east-2
 export EXPKIT_SAGEMAKER_ROLE_ARN=arn:aws:iam::123456789012:role/expkit-sagemaker-exec
 export EXPKIT_AWS_S3_BUCKET=your-expkit-bucket
 export EXPKIT_MAX_BUDGET_USD_PER_RUN=50
-export EXPKIT_AWS_USE_SPOT=1
+export EXPKIT_AWS_COMPUTE=cpu
+export EXPKIT_AWS_USE_SPOT=0
 ```
 
 Then run:
@@ -74,7 +118,7 @@ python examples/train_cloud_example.py
 
 ExpKit will:
 
-- Select a GPU instance using model size, dataset size, speed preference, and budget.
+- Select a small SageMaker instance using model size, dataset size, speed preference, and budget.
 - Submit a real SageMaker training job.
 - Stream CloudWatch logs back into terminal + dashboard.
 - Persist cloud proof artifacts (`account identity`, `job ARN`, `CloudTrail event`) in `events` as `event_type='proof'`.
@@ -111,3 +155,31 @@ Schema is in [`db/schema.sql`](db/schema.sql).
 
 - `aws` mode uses SageMaker in your AWS account. `local` mode keeps the original POC path.
 - Auth, multi-user isolation, artifact storage, and run comparison are intentionally out of scope.
+
+## Publish to PyPI
+
+### One-time setup
+
+1. Create `expkit` on PyPI and TestPyPI.
+2. In GitHub repo settings, configure Trusted Publisher for:
+   - TestPyPI environment: `testpypi`
+   - PyPI environment: `pypi`
+
+### Local release checks
+
+```bash
+python -m pip install -U build twine
+python -m build
+twine check dist/*
+```
+
+### Release
+
+Push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The GitHub Actions workflow at `.github/workflows/pypi-publish.yml` publishes to TestPyPI first, then PyPI.

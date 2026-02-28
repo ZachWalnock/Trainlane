@@ -53,6 +53,12 @@ python examples/train_example.py
 
 Use `EXPKIT_DOCKER=1` to use Docker-backed local simulation instead of direct local worker execution.
 
+## Install from PyPI
+
+```bash
+pip install expkit
+```
+
 ## AWS mode (real cloud compute)
 
 Set:
@@ -114,3 +120,31 @@ Schema is in [`db/schema.sql`](db/schema.sql).
 
 - `aws` mode uses SageMaker in your AWS account. `local` mode keeps the original POC path.
 - Auth, multi-user isolation, artifact storage, and run comparison are intentionally out of scope.
+
+## Publish to PyPI
+
+### One-time setup
+
+1. Create `expkit` on PyPI and TestPyPI.
+2. In GitHub repo settings, configure Trusted Publisher for:
+   - TestPyPI environment: `testpypi`
+   - PyPI environment: `pypi`
+
+### Local release checks
+
+```bash
+python -m pip install -U build twine
+python -m build
+twine check dist/*
+```
+
+### Release
+
+Push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The GitHub Actions workflow at `.github/workflows/pypi-publish.yml` publishes to TestPyPI first, then PyPI.
